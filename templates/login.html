@@ -1,0 +1,56 @@
+{% extends 'base.html' %}
+{% block content %}
+
+<div class="row justify-content-center">
+  <div class="col-md-6 col-lg-4">
+    <div class="card cyber-card">
+      <div class="card-header text-center">
+        <h3><i class="fas fa-sign-in-alt"></i> Access Control</h3>
+      </div>
+      <div class="card-body">
+        <form method="post">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+          
+          <div class="mb-3">
+            <label for="email" class="form-label">
+              <i class="fas fa-envelope"></i> Email Address
+            </label>
+            <input type="email" class="form-control" id="email" name="email" required>
+          </div>
+          
+          <div class="mb-3">
+            <label for="password" class="form-label">
+              <i class="fas fa-lock"></i> Password
+            </label>
+            <input type="password" class="form-control" id="password" name="password" required>
+          </div>
+          
+          <div class="d-grid">
+            <button type="submit" class="btn btn-primary btn-lg">
+              <i class="fas fa-unlock"></i> Authenticate
+            </button>
+          </div>
+        </form>
+        
+        <div class="text-center mt-3">
+          <a href="{{ url_for('reset') }}" class="btn btn-outline-cyber btn-sm">
+            <i class="fas fa-key"></i> Reset Password
+          </a>
+        </div>
+        
+        <hr class="my-4">
+        
+        <div class="text-center">
+          <p class="text-muted mb-2">Don't have access?</p>
+          <a href="{{ url_for('signup') }}" class="btn btn-cyber-success">
+            <i class="fas fa-user-plus"></i> Create Account
+          </a>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+{% endblock %}
+
+

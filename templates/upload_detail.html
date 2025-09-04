@@ -1,0 +1,88 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>🔎 업로드 상세 #{{ meta.id }}</h2>
+
+<div class="mb-2">
+  <b>파일명:</b> {{ meta.filename or '—' }}<br/>
+  <b>업로드 시각(UTC):</b> {{ meta.uploaded_at }}<br/>
+  <b>총 행:</b> {{ meta.total_rows }},
+  <b>악성:</b> {{ meta.malicious_rows }},
+  <b>비율:</b> {{ (meta.malicious_ratio*100)|round(2) }}%
+</div>
+
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin:12px 0;align-items:start;">
+  <div>
+    <h4>정상/악성</h4>
+    <!-- 고정 높이 래퍼 -->
+    <div class="chart-box"><canvas id="pie"></canvas></div>
+  </div>
+  <div>
+    <h4>악성 유형 상위</h4>
+    <!-- 고정 높이 래퍼 -->
+    <div class="chart-box"><canvas id="bar"></canvas></div>
+  </div>
+</div>
+
+
+<hr/>
+
+<h4 class="mt-3">상위 악성 Top 10</h4>
+<table class="table table-sm table-striped">
+  <thead>
+    <tr>
+      <th>duration</th>
+      <th>protocol</th>
+      <th>src_bytes</th>
+      <th>dst_bytes</th>
+      <th>prediction</th>
+    </tr>
+  </thead>
+  <tbody>
+  {% for r in (details.top_malicious or []) %}
+    <tr>
+      <td>{{ r.duration }}</td>
+      <td>{{ r.protocol }}</td>
+      <td>{{ r.src_bytes }}</td>
+      <td>{{ r.dst_bytes }}</td>
+      <td>{{ r.prediction }}</td>
+    </tr>
+  {% endfor %}
+  {% if not details.top_malicious %}
+    <tr><td colspan="5" class="text-muted text-center">대상 데이터가 없습니다.</td></tr>
+  {% endif %}
+  </tbody>
+</table>
+
+<div class="mt-3">
+  <a href="{{ url_for('mypage') }}">← 목록으로</a>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  // 서버에서 전달된 데이터
+  const totals  = {{ totals  | tojson | safe }};
+  const byClass = {{ by_class | tojson | safe }};
+
+  // 파이차트
+  new Chart(document.getElementById('pie'), {
+    type: 'doughnut',
+    data: {
+      labels: ['Normal', 'Malicious'],
+      datasets: [{ data: [totals.normal || 0, totals.malicious || 0] }]
+    },
+    options: { responsive:true, maintainAspectRatio:false }
+  });
+
+  // 막대차트 (상위 8개)
+  const entries = Object.entries(byClass || {}).sort((a,b)=>b[1]-a[1]).slice(0,8);
+  new Chart(document.getElementById('bar'), {
+    type: 'bar',
+    data: {
+      labels: entries.map(e=>e[0]),
+      datasets: [{ label:'count', data: entries.map(e=>e[1]) }]
+    },
+    options: { indexAxis:'y', responsive:true, maintainAspectRatio:false }
+  });
+</script>
+{% endblock %}

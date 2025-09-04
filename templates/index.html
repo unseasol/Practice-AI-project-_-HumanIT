@@ -1,0 +1,322 @@
+{% extends 'base.html' %}
+{% block content %}
+
+<div class="row">
+  <div class="col-12">
+    <div class="card cyber-card">
+      <div class="card-header">
+        <h3><i class="fas fa-upload"></i> Threat Analysis Upload</h3>
+      </div>
+      <div class="card-body">
+        <form id="uploadForm" method="post" enctype="multipart/form-data" action="{{ url_for('upload') }}">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+
+          <div class="file-upload-area" id="uploadArea">
+            <div class="visual-content">
+              <i class="fas fa-cloud-upload-alt fa-3x mb-3"></i>
+              <h4>Drop your CSV file here or click to browse</h4>
+              <p class="text-muted">Supported formats: CSV with network traffic data (Max: 500MB)</p>
+
+              <div class="alert alert-info cyber-alert mt-3">
+                <h6><i class="fas fa-info-circle"></i> Supported Column Formats:</h6>
+                <ul class="mb-0">
+                  <li><strong>Duration:</strong> dur, duration, Flow Duration</li>
+                  <li><strong>Protocol:</strong> proto, protocol, protocol_type</li>
+                  <li><strong>Source Bytes:</strong> sbytes, src_bytes, Total Length of Fwd Packets</li>
+                  <li><strong>Destination Bytes:</strong> dbytes, dst_bytes, Total Length of Bwd Packets</li>
+                  <li><strong>Label:</strong> label, attack_cat, is_malicious</li>
+                </ul>
+              </div>
+
+              <div class="mt-3">
+                <button type="button" class="btn btn-outline-cyber btn-lg" id="chooseFileBtn" onclick="openFileDialog()">
+                  <i class="fas fa-folder-open"></i> BROWSE FILES
+                </button>
+              </div>
+            </div>
+
+            <input type="file" name="file" accept=".csv" id="fileInput" style="display:none">
+          </div>
+
+          <div id="fileInfo" class="mt-3" style="display:none">
+            <div class="alert alert-info cyber-alert">
+              <i class="fas fa-file-csv"></i>
+              <span id="fileName"></span>
+              <button type="button" class="btn-close" onclick="clearFile()"></button>
+            </div>
+          </div>
+
+          <div class="text-center mt-3">
+            {% if session.get('user_email') %}
+              <button class="btn btn-primary btn-lg" type="submit" id="uploadBtn" disabled>
+                <i class="fas fa-rocket"></i> ANALYZE THREATS
+              </button>
+            {% else %}
+              <button class="btn btn-primary btn-lg" type="button" id="uploadBtn" disabled title="로그인 후 이용 가능합니다">
+                <i class="fas fa-rocket"></i> ANALYZE THREATS (로그인 필요)
+              </button>
+            {% endif %}
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Results (강제 가로 2열 Grid) -->
+<div id="resultsSection" class="results-grid d-none mt-4">
+  <!-- Left: Pie -->
+  <div class="card cyber-card">
+    <div class="card-header">
+      <h5><i class="fas fa-chart-pie"></i> Threat Distribution</h5>
+    </div>
+    <div class="card-body">
+      <div class="chart-box"><canvas id="pieChart"></canvas></div>
+    </div>
+  </div>
+
+  <!-- Right: Table -->
+  <div class="card cyber-card">
+    <div class="card-header">
+      <h5><i class="fas fa-exclamation-triangle"></i> Top Malicious Entries</h5>
+    </div>
+    <div class="card-body">
+      <div class="table-responsive">
+        <table class="table table-sm" id="malTable">
+          <thead>
+            <tr>
+              <th>DURATION</th>
+              <th>PROTOCOL</th>
+              <th>SRC BYTES</th>
+              <th>DST BYTES</th>
+              <th>PREDICTION</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Loading Modal -->
+<div class="modal fade" id="loadingModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-sm"><div class="modal-content">
+    <div class="modal-body text-center">
+      <div class="loading mb-3"></div>
+      <h5>Analyzing Threats...</h5>
+      <p class="text-muted">Please wait while we process your data</p>
+    </div>
+  </div></div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<!-- 가로 2열 Grid 강제 (넓으면 2열, 좁으면 1열) -->
+<style>
+  #resultsSection.results-grid{
+    display:grid;
+    grid-template-columns: 1fr 1fr;
+    gap:16px;
+    align-items: stretch;
+  }
+  @media (max-width: 992px){
+    #resultsSection.results-grid{ grid-template-columns: 1fr; }
+  }
+</style>
+
+<script>
+  // 로그인 여부
+  window.IS_AUTH = {{ (session.get('user_email') is not none) | tojson | safe }};
+
+  // HiDPI 캔버스 보정
+  function ensureHiDPICanvas(canvas, maxScale = 3) {
+    const dpr = Math.min(maxScale, window.devicePixelRatio || 1);
+    const rect = canvas.getBoundingClientRect();
+    canvas.style.width  = rect.width + 'px';
+    canvas.style.height = rect.height + 'px';
+    const w = Math.round(rect.width * dpr), h = Math.round(rect.height * dpr);
+    if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
+    return dpr;
+  }
+
+  // DOM refs
+  let fileInput, fileInfo, fileName, uploadBtn, resultsSection, loadingModal;
+
+  function handleFileSelect(file) {
+    if (!file) return;
+    if (fileName) fileName.textContent = `${file.name} (${(file.size/1024).toFixed(1)} KB)`;
+    if (fileInfo) fileInfo.style.display = 'block';
+    if (uploadBtn) uploadBtn.disabled = false;
+
+    const uploadArea = document.getElementById('uploadArea');
+    if (uploadArea) {
+      const visual = uploadArea.querySelector('.visual-content');
+      if (visual) visual.remove();
+      const div = document.createElement('div');
+      div.className = 'visual-content';
+      div.innerHTML = `
+        <i class="fas fa-file-csv fa-3x mb-3 text-success"></i>
+        <h4>File Selected: ${file.name}</h4>
+        <p class="text-muted">Size: ${(file.size/1024).toFixed(1)} KB</p>
+        <div class="mt-3">
+          <button type="button" class="btn btn-outline-cyber btn-lg" onclick="openFileDialog()">
+            <i class="fas fa-folder-open"></i> CHOOSE DIFFERENT FILE
+          </button>
+        </div>`;
+      uploadArea.appendChild(div);
+    }
+    showNotification(`File "${file.name}" selected successfully!`, 'success');
+  }
+
+  function displayResults(data) {
+    // 결과 섹션 먼저 노출 (Grid가 레이아웃을 잡도록)
+    if (resultsSection && resultsSection.classList.contains('d-none')) {
+      resultsSection.classList.remove('d-none');
+    }
+
+    // 다음 프레임에서 캔버스 픽셀 보정 후 렌더
+    requestAnimationFrame(() => {
+      // ===== PIE =====
+      try {
+        if (window.pieChart?.destroy) window.pieChart.destroy();
+        const pieEl = document.getElementById('pieChart');
+        const scale = ensureHiDPICanvas(pieEl, 3);
+
+        const normal = Number(data?.normal_count ?? data?.normal ?? 0);
+        const malicious = Number(data?.malicious_count ?? data?.malicious ?? 0);
+        const total = normal + malicious;
+
+        const hasDetail = data.malicious_details && Object.keys(data.malicious_details).length > 0;
+        const labels = hasDetail ? Object.keys(data.malicious_details) : ['Normal','Malicious'];
+        const values = hasDetail ? Object.values(data.malicious_details) : [normal, malicious];
+        const palette = ['#ff5577','#2f80ed','#f2c94c','#66d9c3','#a866ff','#ff8a3d','#6c63ff','#00c853','#ee7755','#26c6da'];
+
+        window.pieChart = new Chart(pieEl.getContext('2d'), {
+          type: 'pie',
+          data: { labels, datasets: [{ data: values, backgroundColor: palette.slice(0, labels.length), borderColor:'#0b0b0b', borderWidth:1.2, hoverOffset:6 }] },
+          options: {
+            responsive: false, maintainAspectRatio: false, devicePixelRatio: scale,
+            plugins: {
+              title: hasDetail ? {
+                display:true, text:`악성 트래픽 유형별 분포 (총 ${total.toLocaleString()}개)`,
+                color:'#d0d0d0', font:{size:18, weight:'700'}, padding:{top:6,bottom:6}
+              } : { display:false },
+              legend: { position:'bottom', labels:{ color:'#cfcfcf', boxWidth:18, boxHeight:12, padding:12, font:{ size:13, weight:'600' } } },
+              tooltip: { bodyColor:'#e8e8e8',
+                callbacks:{ label(ctx){ const v=Number(ctx.raw)||0; const pct=total?((v/total)*100).toFixed(1):'0.0'; return ` ${ctx.label}: ${v.toLocaleString()} (${pct}%)`; } }
+              }
+            }
+          }
+        });
+
+        // 부모 사이즈 변동 시 선명도 유지
+        if (window.__pieRO) window.__pieRO.disconnect();
+        window.__pieRO = new ResizeObserver(() => {
+          const dpr = ensureHiDPICanvas(pieEl, 3);
+          if (window.pieChart) { window.pieChart.options.devicePixelRatio = dpr; window.pieChart.resize(); }
+        });
+        window.__pieRO.observe(pieEl.parentElement || pieEl);
+      } catch (e) { console.error('pie error:', e); }
+
+      // ===== TABLE =====
+      const tbody = document.querySelector('#malTable tbody');
+      if (tbody) {
+        tbody.innerHTML = '';
+        const list = Array.isArray(data?.top_malicious) ? data.top_malicious : [];
+        if (!list.length) {
+          tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted">No malicious entries found</td></tr>';
+        } else {
+          for (const r of list) {
+            const tr = document.createElement('tr');
+            tr.innerHTML = `
+              <td>${Number(r.duration ?? 0)}</td>
+              <td>${String(r.protocol ?? 'N/A')}</td>
+              <td>${Number(r.src_bytes ?? 0).toLocaleString()}</td>
+              <td>${Number(r.dst_bytes ?? 0).toLocaleString()}</td>
+              <td>${String(r.prediction ?? 'unknown')}</td>`;
+            tbody.appendChild(tr);
+          }
+        }
+      }
+    });
+  }
+  window.displayResults = displayResults;
+
+  // 알림
+  function showNotification(message, type){
+    const alertDiv=document.createElement('div');
+    alertDiv.className=`alert alert-${type} cyber-alert`;
+    alertDiv.innerHTML=`<i class="fas fa-info-circle me-2"></i>${message}<button type="button" class="btn-close" data-bs-dismiss="alert"></button>`;
+    const container=document.querySelector('.container');
+    container.insertBefore(alertDiv, container.firstChild);
+    setTimeout(()=>{ try{ new bootstrap.Alert(alertDiv).close(); }catch{} },3000);
+  }
+  window.showNotification = showNotification;
+
+  // 초기화
+  document.addEventListener('DOMContentLoaded', () => {
+    fileInput = document.getElementById('fileInput');
+    fileInfo  = document.getElementById('fileInfo');
+    fileName  = document.getElementById('fileName');
+    uploadBtn = document.getElementById('uploadBtn');
+    resultsSection = document.getElementById('resultsSection');
+    loadingModal = new bootstrap.Modal(document.getElementById('loadingModal'));
+
+    if (fileInput){
+      fileInput.addEventListener('change', e=>{
+        if (e.target.files.length>0) handleFileSelect(e.target.files[0]);
+      });
+    }
+    const uploadArea=document.getElementById('uploadArea');
+    if (uploadArea){
+      uploadArea.addEventListener('dragover',e=>{e.preventDefault();uploadArea.classList.add('dragover')});
+      uploadArea.addEventListener('dragleave',()=>uploadArea.classList.remove('dragover'));
+      uploadArea.addEventListener('drop',e=>{
+        e.preventDefault();uploadArea.classList.remove('dragover');
+        if (e.dataTransfer.files.length>0) handleFileSelect(e.dataTransfer.files[0]);
+      });
+    }
+
+    const form=document.getElementById('uploadForm');
+    if (form){
+      form.addEventListener('submit', async (e)=>{
+        e.preventDefault();
+        if (!window.IS_AUTH) return showNotification('로그인이 필요합니다.', 'warning');
+        if (!fileInput?.files?.length) return showNotification('Please select a file first', 'warning');
+
+        const file=fileInput.files[0];
+        if (!file.name.toLowerCase().endsWith('.csv')) return showNotification('Please select a CSV file', 'warning');
+        if (file.size>500*1024*1024) return showNotification('File exceeds 500MB limit', 'warning');
+
+        loadingModal.show();
+        try{
+          const formData=new FormData(form);
+          const controller=new AbortController();
+          const timeout=setTimeout(()=>controller.abort(),150000);
+          const res=await fetch('{{ url_for("upload") }}',{method:'POST',body:formData,signal:controller.signal});
+          clearTimeout(timeout);
+
+          let result;
+          try{ result=await res.json(); }catch{ showNotification('Server returned invalid response format','danger'); return; }
+
+          if (res.ok){ displayResults(result); showNotification('Analysis completed successfully!','success'); }
+          else{
+            const msg=result?.error || (res.status===401?'로그인이 필요합니다.':res.status===500?'서버 오류가 발생했습니다.':'업로드 실패');
+            showNotification(msg,'danger');
+          }
+        }catch(err){
+          showNotification(err?.name==='AbortError'?'Request timeout - please try again':'Network error occurred','danger');
+        }finally{
+          try{ if (document.activeElement && document.activeElement.closest('.modal')) document.activeElement.blur(); loadingModal.hide(); }
+          catch{
+            const modal=document.getElementById('loadingModal');
+            if (modal){ modal.classList.remove('show'); modal.style.display='none'; document.body.classList.remove('modal-open'); const b=document.querySelector('.modal-backdrop'); if (b) b.remove(); }
+          }
+        }
+      });
+    }
+  });
+</script>
+{% endblock %}

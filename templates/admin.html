@@ -1,0 +1,66 @@
+{% extends 'base.html' %}
+{% block content %}
+<h3><span class="badge-hacker">☠</span> 관리자 대시보드</h3>
+<form method="post" action="{{ url_for('admin_send_report') }}" class="mb-3">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+  <button class="btn btn-outline-primary" type="submit">보고서 이메일 발송</button>
+  </form>
+
+<div class="row mb-3">
+  <div class="col-md-6">
+    <h5><span class="badge-hacker">☠</span> 시간별 악성 탐지 추이</h5>
+    <canvas id="lineChart"></canvas>
+  </div>
+  <div class="col-md-6">
+    <h5><span class="badge-hacker">☠</span> 정상/악성 비율</h5>
+    <canvas id="barChart"></canvas>
+  </div>
+</div>
+
+<h5><span class="badge-hacker">☠</span> 사용자별 업로드 횟수</h5>
+<div class="table-responsive mb-3">
+  <table class="table table-sm table-bordered">
+    <thead><tr><th>사용자</th><th>업로드 횟수</th></tr></thead>
+    <tbody>
+      {% for user, cnt in user_counts.items() %}
+        <tr><td>{{ user }}</td><td>{{ cnt }}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<h5><span class="badge-hacker">☠</span> 전체 로그</h5>
+<div class="table-responsive">
+  <table class="table table-sm table-striped">
+    <thead>
+      <tr>
+        <th>ID</th>
+        <th>이메일</th>
+        <th>업로드 시간(UTC)</th>
+        <th>악성 비율</th>
+        <th>총 행</th>
+        <th>악성 행</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in rows %}
+        <tr>
+          <td>{{ row[0] }}</td>
+          <td>{{ row[1] }}</td>
+          <td>{{ row[2] }}</td>
+          <td>{{ (row[3] * 100) | round(2) }}%</td>
+          <td>{{ row[4] }}</td>
+          <td>{{ row[5] }}</td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<script>
+  renderLineChart('lineChart', {{ time_series | tojson }});
+  renderBarChart('barChart', {{ totals.normal | default(0) }}, {{ totals.malicious | default(0) }});
+</script>
+{% endblock %}
+
+

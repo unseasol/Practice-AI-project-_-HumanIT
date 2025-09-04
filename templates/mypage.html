@@ -1,0 +1,156 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>📂 내 위협분석 기록</h2>
+
+<!-- 요약 카드 -->
+<div style="display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:12px 0;">
+  <div class="card p-3"><b>총 업로드</b><div>{{ summary.total_uploads | comma }}</div></div>
+  <div class="card p-3"><b>총 행수</b><div>{{ summary.total_rows | comma }}</div></div>
+  <div class="card p-3"><b>누적 악성</b><div>{{ summary.total_mal | comma }}</div></div>
+  <div class="card p-3"><b>평균 악성 비율</b><div>{{ (summary.avg_ratio*100)|round(2) }}%</div></div>
+</div>
+<p class="text-muted">최근 업로드: {{ summary.last_time or '—' }}</p>
+
+<!-- 차트 -->
+<!-- 차트 -->
+<div style="display:grid; grid-template-columns:1fr 1fr; gap:16px; align-items:start;">
+  <div>
+    <h4>전체 정상/악성</h4>
+    <div class="chart-box"><canvas id="pie"></canvas></div>
+  </div>
+  <div>
+    <h4>악성 유형 상위</h4>
+    <div class="chart-box"><canvas id="bar"></canvas></div>
+  </div>
+</div>
+
+
+<hr/>
+
+<!-- 업로드 목록 -->
+<h4 class="mt-3">업로드 히스토리</h4>
+<table class="table table-striped table-hover">
+  <thead>
+    <tr>
+      <th>ID</th>
+      <th>업로드 시각</th>
+      <th>파일명</th>
+      <th>총 행</th>
+      <th>악성</th>
+      <th>비율</th>
+    </tr>
+  </thead>
+  <tbody>
+  {% for r in logs %}
+    <tr>
+      <td><a href="{{ url_for('upload_detail', upload_id=r.id) }}">{{ r.id }}</a></td>
+      <td>{{ r.uploaded_at }}</td>
+      <td>{{ r.filename or '—' }}</td>
+      <td>{{ r.total_rows }}</td>
+      <td>{{ r.malicious_rows }}</td>
+      <td>{{ (r.malicious_ratio*100)|round(2) }}%</td>
+    </tr>
+  {% endfor %}
+  {% if logs|length == 0 %}
+    <tr><td colspan="6" class="text-muted text-center">기록이 없습니다.</td></tr>
+  {% endif %}
+  </tbody>
+</table>
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+  // 서버 데이터 (Jinja → JS 안전 변환)
+  const normalVal    = {{ summary.total_normal | tojson | safe }};
+  const maliciousVal = {{ summary.total_mal    | tojson | safe }};
+  const byClassData  = {{ by_class             | tojson | safe }};
+
+  // 캔버스
+  const pieEl = document.getElementById('pie');
+  const barEl = document.getElementById('bar');
+
+  // 가드: Chart.js 로드 여부
+  if (typeof Chart === 'undefined') {
+    console.error('Chart.js not loaded. Check base.html script order.');
+    return;
+  }
+
+  // -------- 파이(도넛) --------
+  (function renderPie() {
+    const total = (Number(normalVal) || 0) + (Number(maliciousVal) || 0);
+
+    if (!pieEl) return;
+
+    if (total === 0) {
+      // 데이터 없을 때 안내 문구
+      const ctx = pieEl.getContext('2d');
+      ctx.clearRect(0, 0, pieEl.width, pieEl.height);
+      ctx.font = '16px sans-serif';
+      ctx.fillStyle = '#00ff41';
+      ctx.textAlign = 'center';
+      ctx.fillText('표시할 데이터가 없습니다', pieEl.width / 2, pieEl.height / 2);
+      return;
+    }
+
+    new Chart(pieEl, {
+      type: 'doughnut',
+      data: {
+        labels: ['Normal', 'Malicious'],
+        datasets: [{
+          data: [Number(normalVal) || 0, Number(maliciousVal) || 0],
+          backgroundColor: ['#00c853', '#ff1744'],
+          borderColor: ['#00c853', '#ff1744'],
+          borderWidth: 1.5,
+          hoverOffset: 4
+        }]
+      },
+      options: { responsive: true, maintainAspectRatio: false }
+    });
+  })();
+
+  // -------- 막대 --------
+  (function renderBar() {
+    if (!barEl) return;
+
+    const entries = Object.entries(byClassData || {})
+      .map(([k, v]) => [String(k), Number(v) || 0])
+      .filter(([, v]) => v > 0)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 8);
+
+    if (entries.length === 0) {
+      const ctx = barEl.getContext('2d');
+      ctx.clearRect(0, 0, barEl.width, barEl.height);
+      ctx.font = '16px sans-serif';
+      ctx.fillStyle = '#00ff41';
+      ctx.textAlign = 'center';
+      ctx.fillText('표시할 데이터가 없습니다', barEl.width / 2, barEl.height / 2);
+      return;
+    }
+
+    new Chart(barEl, {
+      type: 'bar',
+      data: {
+        labels: entries.map(e => e[0]),
+        datasets: [{
+          label: 'count',
+          data: entries.map(e => e[1]),
+          backgroundColor: '#ff1744'
+        }]
+      },
+      options: {
+        indexAxis: 'y',
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: { legend: { display: false } },
+        scales: {
+          x: { ticks: { color: '#00ff41' }, grid: { color: 'rgba(0,255,65,.12)' } },
+          y: { ticks: { color: '#00ff41' }, grid: { color: 'rgba(0,255,65,.08)' } }
+        }
+      }
+    });
+  })();
+});
+</script>
+{% endblock %}
