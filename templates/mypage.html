@@ -44,7 +44,7 @@
   {% for r in logs %}
     <tr>
       <td><a href="{{ url_for('upload_detail', upload_id=r.id) }}">{{ r.id }}</a></td>
-      <td>{{ r.uploaded_at }}</td>
+      <td>{{ r.uploaded_at_fmt }}</td>
       <td>{{ r.filename or '—' }}</td>
       <td>{{ r.total_rows }}</td>
       <td>{{ r.malicious_rows }}</td>
@@ -136,7 +136,8 @@ document.addEventListener('DOMContentLoaded', function () {
         datasets: [{
           label: 'count',
           data: entries.map(e => e[1]),
-          backgroundColor: '#ff1744'
+          backgroundColor: ['#ff1744', '#0dcaf0', '#6f42c1', '#d63384'
+          , '#dc3545', '#fd7e14', '#ffc107', '#20c997']
         }]
       },
       options: {

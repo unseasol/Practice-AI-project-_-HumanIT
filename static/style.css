@@ -3,7 +3,8 @@
   --bg-primary:#0a0a0a; --bg-secondary:#1a1a1a; --bg-tertiary:#2a2a2a;
   --text-primary:#00ff41; --text-secondary:#00cc33; --text-muted:#666;
   --accent-primary:#00ff41; --accent-secondary:#ff0040; --accent-tertiary:#0080ff;
-  --border-primary:#00ff41; --border-secondary:#333;
+  --border-primary:#00ff41; --border-secondary:#333; 
+  --bs-body-color:#a1a0a0;  --bs-secondary-color:#a1a0a0;
   --shadow-glow:0 0 20px rgba(0,255,65,.3); --shadow-glow-strong:0 0 30px rgba(0,255,65,.5);
 }
 *{box-sizing:border-box}

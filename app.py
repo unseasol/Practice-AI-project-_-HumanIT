@@ -33,8 +33,12 @@ import requests
 from supabase import create_client, Client
 from jose import jwt, JWTError
 
+from zoneinfo import ZoneInfo
+
+supabase: Client | None = None
 
 def create_app() -> Flask:
+    global supabase
     app = Flask(__name__)
     app.secret_key = os.environ.get("FLASK_SECRET_KEY", secrets.token_hex(32))
 
@@ -56,8 +60,11 @@ def create_app() -> Flask:
         FEATURE_NAMES_PATH=os.path.join(os.path.dirname(__file__), "model", "feature_names.pkl"),
     )
 
+    # 👇 서버 재기동 식별값 (재시작 때마다 변경)
+    app.config["BOOT_ID"] = secrets.token_hex(8)
+
     # Initialize Supabase client
-    supabase: Client | None = None
+    # supabase: Client | None = None
     if app.config["SUPABASE_URL"] and app.config["SUPABASE_KEY"]:
         supabase = create_client(app.config["SUPABASE_URL"], app.config["SUPABASE_KEY"])  # type: ignore
 
@@ -87,6 +94,11 @@ def create_app() -> Flask:
     def ensure_csrf_token() -> None:
         if "csrf_token" not in session:
             session["csrf_token"] = secrets.token_urlsafe(32)
+
+    @app.before_request
+    def invalidate_on_restart():
+        if session.get("user_email") and session.get("boot_id") != app.config["BOOT_ID"]:
+            session.clear()
 
     def validate_csrf() -> bool:
         token = request.form.get("csrf_token") or request.headers.get("X-CSRF-Token")
@@ -122,6 +134,7 @@ def create_app() -> Flask:
         def wrapped(*args, **kwargs):
             token = _get_current_jwt()
             if not _jwt_is_valid(token):
+                session.clear()  # 👈 추가: 남은 쿠키/세션 싹 정리
                 return jsonify({"error": "로그인이 필요합니다. 먼저 로그인해주세요."}), 401
             return view(*args, **kwargs)
         return wrapped
@@ -190,25 +203,44 @@ def create_app() -> Flask:
                 access_token = result.session.access_token  # type: ignore[attr-defined]
                 session["access_token"] = access_token
                 session["user_email"] = email
+                session["boot_id"] = app.config["BOOT_ID"]   # 👈 추가: 현재 부팅 ID를 세션에 저장
                 flash("로그인 성공", "success")
                 return redirect(url_for("index"))
             except Exception as e:
                 return render_template("error.html", message=str(e)), 400
         return render_template("login.html", csrf_token=session.get("csrf_token"))
+    
+    def _fmt_kst_str(value, fmt="%Y.%m.%d.  %H:%M"):  # 날짜 뒤 공백 2칸
+        if value is None:
+            return "N/A"
+        if isinstance(value, str):
+            s = value.strip().replace("Z", "+00:00")  # 'Z' → '+00:00'
+            try:
+                d = dt.datetime.fromisoformat(s)
+            except Exception:
+                return value
+        elif isinstance(value, dt.datetime):
+            d = value
+        else:
+            return str(value)
+        if d.tzinfo is None:  # naive면 UTC로 간주
+            d = d.replace(tzinfo=dt.timezone.utc)
+        return d.astimezone(ZoneInfo("Asia/Seoul")).strftime(fmt)
 
     @app.route("/mypage")
     @login_required
     def mypage():
         email = session.get("user_email")
-        with sqlite3.connect(app.config["DATABASE_PATH"]) as conn:
-            conn.row_factory = sqlite3.Row
-            rows = conn.execute("""
-                SELECT id, uploaded_at, filename, total_rows, malicious_rows, malicious_ratio, details_json
-                FROM uploads
-                WHERE email = ?
-                ORDER BY uploaded_at DESC
-            """, (email,)).fetchall()
 
+        response = (
+            supabase.table("uploads")
+            .select("id, uploaded_at, filename, total_rows, malicious_rows, malicious_ratio, details_json")
+            .eq("email", email)
+            .order("uploaded_at", desc=False)
+            .execute()
+        )
+
+        rows = response.data or []
         logs = [dict(r) for r in rows]
 
         # 요약 카드용 집계
@@ -218,19 +250,17 @@ def create_app() -> Flask:
         avg_ratio = (sum(r["malicious_ratio"] for r in logs) / total_uploads) if total_uploads else 0.0
         last_time = logs[0]["uploaded_at"] if logs else None
 
-        # 클래스 분포 통합(여러 업로드의 malicious_details 합치기)
-        by_class: dict[str, int] = {}
-        import json as _json
         for r in logs:
-            if r.get("details_json"):
-                try:
-                    d = _json.loads(r["details_json"])
-                    for k, v in (d.get("malicious_details") or {}).items():
-                        by_class[k] = by_class.get(k, 0) + int(v)
-                except Exception:
-                    pass
+            r["uploaded_at_fmt"] = _fmt_kst_str(r.get("uploaded_at"))
 
-        # 전체 정상/악성 합계(파이차트용)
+        # 클래스 분포 통합
+        by_class: dict[str, int] = {}
+        for r in logs:
+            d = r.get("details_json")
+            if d and isinstance(d, dict):  # JSONB → dict 로 이미 내려옴
+                for k, v in (d.get("malicious_details") or {}).items():
+                    by_class[k] = by_class.get(k, 0) + int(v)
+
         total_normal = total_rows - total_mal
 
         return render_template(
@@ -248,43 +278,46 @@ def create_app() -> Flask:
             csrf_token=session.get("csrf_token"),
         )
 
+
     @app.route("/mypage/<int:upload_id>")
     @login_required
     def upload_detail(upload_id: int):
         email = session.get("user_email")
-        with sqlite3.connect(app.config["DATABASE_PATH"]) as conn:
-            conn.row_factory = sqlite3.Row
-            row = conn.execute("""
-                SELECT id, email, uploaded_at, filename, total_rows, malicious_rows, malicious_ratio, details_json
-                FROM uploads
-                WHERE id = ? AND email = ?
-            """, (upload_id, email)).fetchone()
+
+        # Supabase에서 단일 row 가져오기
+        response = (
+            supabase.table("uploads")
+            .select("id, email, uploaded_at, filename, total_rows, malicious_rows, malicious_ratio, details_json")
+            .eq("id", upload_id)
+            .eq("email", email)
+            .single()
+            .execute()
+        )
+
+        row = response.data
         if not row:
             abort(404)
 
-        details = {}
-        try:
-            if row["details_json"]:
-                details = json.loads(row["details_json"])
-        except Exception:
-            details = {}
+        # details_json은 JSONB → 이미 dict
+        details = row.get("details_json") or {}
 
         # 파이차트용 합계
-        total_rows = row["total_rows"] or 0
-        mal_rows = row["malicious_rows"] or 0
+        total_rows = row.get("total_rows") or 0
+        mal_rows = row.get("malicious_rows") or 0
         normal_rows = total_rows - mal_rows
 
         # by-class 분포
-        by_class = (details.get("malicious_details") or {})
+        by_class = details.get("malicious_details") or {}
 
         return render_template(
             "upload_detail.html",
-            meta=dict(row),
+            meta=row,
             details=details,
             totals=dict(normal=normal_rows, malicious=mal_rows),
             by_class=by_class,
             csrf_token=session.get("csrf_token"),
         )
+
 
 
     @app.route("/logout")
@@ -547,15 +580,17 @@ def create_app() -> Flask:
 
             # === 로그 저장(파일명 + 상세 JSON까지 저장) ===
             email = _get_current_user_email() or "unknown"
+            uploaded_at = dt.datetime.now(dt.timezone.utc)
             _insert_log(
                 app.config["DATABASE_PATH"],
                 email,
-                dt.datetime.utcnow(),
+                uploaded_at,
                 malicious_ratio,
                 total_count,
                 malicious_count,
                 filename=filename,                                            # ← 추가 저장
-                details_json=json.dumps(result_payload, ensure_ascii=False)   # ← 추가 저장
+                details_json=result_payload   # ← 추가 저장
+                # details_json=json.dumps(result_payload, ensure_ascii=False)   # ← 추가 저장
             )
 
             # === 응답 ===
@@ -758,16 +793,44 @@ def _init_db(db_path: str) -> None:
 def _insert_log(db_path: str, email: str, uploaded_at: dt.datetime,
                 ratio: float, total: int, mal: int,
                 filename: str | None = None,
-                details_json: str | None = None) -> None:
-    with sqlite3.connect(db_path) as conn:
-        cur = conn.cursor()
-        cur.execute("""
-            INSERT INTO uploads
-              (email, uploaded_at, malicious_ratio, total_rows, malicious_rows, filename, details_json)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        """, (email, uploaded_at.isoformat(), float(ratio), int(total), int(mal),
-              filename, details_json))
-        conn.commit()
+                details_json: dict | None = None) -> None:
+    data = {
+        "email": email,
+        "uploaded_at": uploaded_at.isoformat(),  # Supabase TIMESTAMPTZ 호환
+        "malicious_ratio": float(ratio),
+        "total_rows": int(total),
+        "malicious_rows": int(mal),
+        "filename": filename,
+        "details_json": details_json,  # dict 그대로 저장 (Supabase가 자동 변환)
+    }
+
+    # INSERT + 반환행 받기
+    res = supabase.table("uploads").insert(data).execute()
+
+    # 1) SDK 표준 에러 우선 확인
+    if getattr(res, "error", None):
+        msg = getattr(res.error, "message", None) or str(res.error)
+        raise RuntimeError(f"Supabase insert failed: {msg}")
+
+    # 2) 어떤 환경에선 status_code가 있을 수 있으니 있으면 보조 체크만
+    sc = getattr(res, "status_code", None)
+    if sc is not None and sc >= 400:
+        raise RuntimeError(f"Supabase HTTP {sc}: {getattr(res, 'data', None)}")
+
+    # 3) 정상 리턴 (행을 받지 않을 수도 있으니 방어적으로)
+    if getattr(res, "data", None):
+        return res.data[0] if isinstance(res.data, list) else res.data
+    return None
+    
+    # with sqlite3.connect(db_path) as conn:
+    #     cur = conn.cursor()
+    #     cur.execute("""
+    #         INSERT INTO uploads
+    #           (email, uploaded_at, malicious_ratio, total_rows, malicious_rows, filename, details_json)
+    #         VALUES (?, ?, ?, ?, ?, ?, ?)
+    #     """, (email, uploaded_at.isoformat(), float(ratio), int(total), int(mal),
+    #           filename, details_json))
+    #     conn.commit()
 
 
 
