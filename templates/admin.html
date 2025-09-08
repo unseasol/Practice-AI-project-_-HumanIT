@@ -1,29 +1,38 @@
 {% extends 'base.html' %}
 {% block content %}
 <h3><span class="badge-hacker">☠</span> 관리자 대시보드</h3>
+
 <form method="post" action="{{ url_for('admin_send_report') }}" class="mb-3">
   <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
-  <button class="btn btn-outline-primary" type="submit">보고서 이메일 발송</button>
-  </form>
+  <!-- 테마에 맞게 버튼 클래스를 통일하려면 btn-outline-cyber 사용 가능 -->
+  <button class="btn btn-outline-cyber" type="submit">보고서 이메일 발송</button>
+</form>
 
-<div class="row mb-3">
+<!-- <div class="row mb-3">
   <div class="col-md-6">
     <h5><span class="badge-hacker">☠</span> 시간별 악성 탐지 추이</h5>
-    <canvas id="lineChart"></canvas>
+    <div class="chart-box"><canvas id="lineChart"></canvas></div>
   </div>
   <div class="col-md-6">
     <h5><span class="badge-hacker">☠</span> 정상/악성 비율</h5>
-    <canvas id="barChart"></canvas>
+    <div class="chart-box"><canvas id="barChart"></canvas></div>
   </div>
-</div>
+</div> -->
 
 <h5><span class="badge-hacker">☠</span> 사용자별 업로드 횟수</h5>
 <div class="table-responsive mb-3">
   <table class="table table-sm table-bordered">
-    <thead><tr><th>사용자</th><th>업로드 횟수</th></tr></thead>
+    <thead>
+      <tr><th>사용자</th><th>업로드 횟수</th></tr>
+    </thead>
     <tbody>
-      {% for user, cnt in user_counts.items() %}
-        <tr><td>{{ user }}</td><td>{{ cnt }}</td></tr>
+      {% for user, cnt in (user_counts or {}).items() %}
+        <tr>
+          <td>{{ user }}</td>
+          <td>{{ cnt }}</td>
+        </tr>
+      {% else %}
+        <tr><td colspan="2" class="text-muted text-center">데이터가 없습니다.</td></tr>
       {% endfor %}
     </tbody>
   </table>
@@ -31,6 +40,12 @@
 
 <h5><span class="badge-hacker">☠</span> 전체 로그</h5>
 <div class="table-responsive">
+  <!-- [PAGE] 현재 범위 요약 -->
+  {% set start_idx = (page - 1) * per_page + 1 if total > 0 else 0 %}
+  {% set end_idx   = (page * per_page) if (page * per_page) < total else total %}
+  <p class="text-muted" style="margin:6px 0;">
+    총 {{ total | comma }}건 · {{ start_idx | comma }}–{{ end_idx | comma }} (페이지 {{ page }}/{{ page_count }})
+  </p>
   <table class="table table-sm table-striped">
     <thead>
       <tr>
@@ -43,24 +58,83 @@
       </tr>
     </thead>
     <tbody>
-      {% for row in rows %}
-        <tr>
-          <td>{{ row[0] }}</td>
-          <td>{{ row[1] }}</td>
-          <td>{{ row[2] }}</td>
-          <td>{{ (row[3] * 100) | round(2) }}%</td>
-          <td>{{ row[4] }}</td>
-          <td>{{ row[5] }}</td>
-        </tr>
+      {% for row in (rows or []) %}
+        {% if row is mapping %}
+          <tr>
+            <td>{{ row.no }}</td>
+            <td>{{ row.email }}</td>
+            <td>{{ row.uploaded_at_fmt }}</td>
+            <td>{{ ((row.malicious_ratio or 0) * 100) | round(2) }}%</td>
+            <td>{{ row.total_rows }}</td>
+            <td>{{ row.malicious_rows }}</td>
+          </tr>
+        {% else %}
+          {# 튜플/리스트 형태(row[0]~row[5])도 지원 #}
+          <tr>
+            <td>{{ row[0] if row|length > 0 else '' }}</td>
+            <td>{{ row[1] if row|length > 1 else '' }}</td>
+            <td>{{ row[2] if row|length > 2 else '' }}</td>
+            <td>
+              {# row[3]가 비율(0~1)이라고 가정 #}
+              {% set ratio = (row[3] if row|length > 3 else 0) %}
+              {{ ((ratio or 0) * 100) | round(2) }}%
+            </td>
+            <td>{{ row[4] if row|length > 4 else '' }}</td>
+            <td>{{ row[5] if row|length > 5 else '' }}</td>
+          </tr>
+        {% endif %}
+      {% else %}
+        <tr><td colspan="6" class="text-muted text-center">로그가 없습니다.</td></tr>
       {% endfor %}
     </tbody>
   </table>
+  <!-- [PAGE] 페이지네이션 (mypage와 동일 / 10페이지 단위 그룹, 중앙정렬) -->
+  {% if page_count > 1 %}
+    <nav aria-label="pagination" class="pagination-wrap">
+      <ul class="pagination">
+        <!-- 이전 -->
+        <li class="page-item {{ 'disabled' if page <= 1 }}">
+          <a class="page-link" href="{{ url_for('admin', page=page-1) if page>1 else '#' }}">이전</a>
+        </li>
+
+        {% set group_size = 10 %}
+        {% set current_group = (page - 1) // group_size %}
+        {% set start_p = current_group * group_size + 1 %}
+        {% set end_p = [start_p + group_size - 1, page_count]|min %}
+
+        {% for p in range(start_p, end_p+1) %}
+          <li class="page-item {{ 'active' if p == page }}">
+            <a class="page-link" href="{{ url_for('admin', page=p) }}">{{ p }}</a>
+          </li>
+        {% endfor %}
+
+        <!-- 다음 -->
+        <li class="page-item {{ 'disabled' if page >= page_count }}">
+          <a class="page-link" href="{{ url_for('admin', page=page+1) if page<page_count else '#' }}">다음</a>
+        </li>
+      </ul>
+    </nav>
+  {% endif %}
 </div>
 
+{# ====== 차트 렌더 ====== #}
 <script>
-  renderLineChart('lineChart', {{ time_series | tojson }});
-  renderBarChart('barChart', {{ totals.normal | default(0) }}, {{ totals.malicious | default(0) }});
+  // 서버에서 안 넘어와도 안전하게 디폴트
+  const _timeSeries = {{ (time_series | default([], true)) | tojson | safe }};
+  const _totals = {{ (totals | default({}, true)) | tojson | safe }};
+  const _normal = Number(_totals.normal ?? 0);
+  const _mal = Number(_totals.malicious ?? 0);
+
+  // 차트 유틸 함수 존재 가드
+  if (typeof renderLineChart === 'function' && typeof renderBarChart === 'function') {
+    try {
+      renderLineChart('lineChart', _timeSeries);
+      renderBarChart('barChart', _normal, _mal);
+    } catch (e) {
+      console.error('Chart render error:', e);
+    }
+  } else {
+    console.warn('Chart helpers not loaded yet.');
+  }
 </script>
 {% endblock %}
-
-

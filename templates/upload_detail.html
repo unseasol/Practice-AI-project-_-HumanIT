@@ -53,8 +53,12 @@
   </tbody>
 </table>
 
-<div class="mt-3">
-  <a href="{{ url_for('mypage') }}">← 목록으로</a>
+<!-- [CHANGE] 목록으로 버튼 -->
+<div class="detail-actions mt-3">
+  <a class="btn-nav btn-back"
+     href="{{ url_for('mypage', page=request.args.get('page', 1)) }}">
+    목록으로
+  </a>
 </div>
 {% endblock %}
 

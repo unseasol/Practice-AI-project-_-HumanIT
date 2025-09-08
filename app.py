@@ -34,8 +34,11 @@ from supabase import create_client, Client
 from jose import jwt, JWTError
 
 from zoneinfo import ZoneInfo
+import re
 
 supabase: Client | None = None
+_TZ_RE = re.compile(r'([+-]\d{2}:\d{2})')  # ±HH:MM
+PER_PAGE = 10
 
 def create_app() -> Flask:
     global supabase
@@ -210,21 +213,65 @@ def create_app() -> Flask:
                 return render_template("error.html", message=str(e)), 400
         return render_template("login.html", csrf_token=session.get("csrf_token"))
     
-    def _fmt_kst_str(value, fmt="%Y.%m.%d.  %H:%M"):  # 날짜 뒤 공백 2칸
+    # def _fmt_kst_str(value, fmt="%Y.%m.%d.  %H:%M"):  # 날짜 뒤 공백 2칸
+    #     if value is None:
+    #         return "N/A"
+    #     if isinstance(value, str):
+    #         s = value.strip().replace("Z", "+00:00")  # 'Z' → '+00:00'
+    #         try:
+    #             d = dt.datetime.fromisoformat(s)
+    #         except Exception:
+    #             return value
+    #     elif isinstance(value, dt.datetime):
+    #         d = value
+    #     else:
+    #         return str(value)
+    #     if d.tzinfo is None:  # naive면 UTC로 간주
+    #         d = d.replace(tzinfo=dt.timezone.utc)
+    #     return d.astimezone(ZoneInfo("Asia/Seoul")).strftime(fmt)
+
+    def parse_iso_to_aware_utc(value) -> dt.datetime | None:
+        """문자열/datetime 어떤 형식이 와도 UTC-aware datetime으로 반환."""
         if value is None:
-            return "N/A"
-        if isinstance(value, str):
-            s = value.strip().replace("Z", "+00:00")  # 'Z' → '+00:00'
-            try:
-                d = dt.datetime.fromisoformat(s)
-            except Exception:
-                return value
-        elif isinstance(value, dt.datetime):
-            d = value
-        else:
-            return str(value)
-        if d.tzinfo is None:  # naive면 UTC로 간주
+            return None
+
+        # 이미 datetime이면 tz 부여 or 유지
+        if isinstance(value, dt.datetime):
+            return value if value.tzinfo else value.replace(tzinfo=dt.timezone.utc)
+
+        # 문자열 처리
+        s = str(value).strip().replace("Z", "+00:00")
+        # '...+00:00blah' 같은 잡음이 있으면 최초 오프셋까지만 남김
+        m = _TZ_RE.search(s)
+        if m:
+            s = s[:m.end()]
+
+        # 1차: fromisoformat (ISO 대부분 처리)
+        try:
+            d = dt.datetime.fromisoformat(s)
+        except Exception:
+            # 2차: 타임존 포함된 strptime (%z) 시도
+            for fmt in ("%Y-%m-%dT%H:%M:%S.%f%z",
+                        "%Y-%m-%dT%H:%M:%S%z",
+                        "%Y-%m-%d %H:%M:%S.%f%z",
+                        "%Y-%m-%d %H:%M:%S%z"):
+                try:
+                    d = dt.datetime.strptime(s, fmt)
+                    break
+                except Exception:
+                    d = None
+            if d is None:
+                return None
+
+        # tz가 없으면 UTC로 간주
+        if d.tzinfo is None:
             d = d.replace(tzinfo=dt.timezone.utc)
+        return d
+
+    def fmt_kst(value, fmt="%Y.%m.%d.  %H:%M") -> str:
+        d = parse_iso_to_aware_utc(value)
+        if not d:
+            return "N/A"
         return d.astimezone(ZoneInfo("Asia/Seoul")).strftime(fmt)
 
     @app.route("/mypage")
@@ -232,16 +279,38 @@ def create_app() -> Flask:
     def mypage():
         email = session.get("user_email")
 
+        # --- 페이지 파라미터 처리 ---  [PAGE]
+        page = request.args.get("page", 1, type=int)
+        if page < 1:
+            page = 1
+        start = (page - 1) * PER_PAGE
+        end   = start + PER_PAGE - 1
+
         response = (
             supabase.table("uploads")
-            .select("id, uploaded_at, filename, total_rows, malicious_rows, malicious_ratio, details_json")
+            .select("id, uploaded_at, filename, total_rows, malicious_rows, malicious_ratio, details_json",
+                    count="exact")             # [PAGE] 총 개수 받기
             .eq("email", email)
-            .order("uploaded_at", desc=False)
+            .order("uploaded_at", desc=False)  # 기존 정렬 그대로 유지
+            .range(start, end)                 # [PAGE] 현재 페이지 범위
             .execute()
         )
+        # response = (
+        #     supabase.table("uploads")
+        #     .select("id, uploaded_at, filename, total_rows, malicious_rows, malicious_ratio, details_json")
+        #     .eq("email", email)
+        #     .order("uploaded_at", desc=False)
+        #     .execute()
+        # )
 
         rows = response.data or []
         logs = [dict(r) for r in rows]
+
+        # 순번 컬럼
+        for idx, r in enumerate(logs, start=start + 1):  # start는 페이지 시작 인덱스
+            r["no"] = idx
+            r["uploaded_at_fmt"] = fmt_kst(r.get("uploaded_at"))
+            # r["uploaded_at_fmt"] = _fmt_kst_str(r.get("uploaded_at"))
 
         # 요약 카드용 집계
         total_uploads = len(logs)
@@ -250,8 +319,8 @@ def create_app() -> Flask:
         avg_ratio = (sum(r["malicious_ratio"] for r in logs) / total_uploads) if total_uploads else 0.0
         last_time = logs[0]["uploaded_at"] if logs else None
 
-        for r in logs:
-            r["uploaded_at_fmt"] = _fmt_kst_str(r.get("uploaded_at"))
+        # for r in logs:
+        #     r["uploaded_at_fmt"] = _fmt_kst_str(r.get("uploaded_at"))
 
         # 클래스 분포 통합
         by_class: dict[str, int] = {}
@@ -262,6 +331,12 @@ def create_app() -> Flask:
                     by_class[k] = by_class.get(k, 0) + int(v)
 
         total_normal = total_rows - total_mal
+
+        # --- 페이지네이션 정보 계산 ---  [PAGE]
+        total = int(response.count or 0)
+        page_count = max(1, math.ceil(total / PER_PAGE))
+        if page > page_count:
+            page = page_count  # 너무 큰 페이지로 들어오면 마지막 페이지로 보정
 
         return render_template(
             "mypage.html",
@@ -276,6 +351,11 @@ def create_app() -> Flask:
             ),
             by_class=by_class,
             csrf_token=session.get("csrf_token"),
+            # ↓↓↓ 페이지네이션 템플릿용 값들 추가  [PAGE]
+            page=page,
+            page_count=page_count,
+            total=total,
+            per_page=PER_PAGE,
         )
 
 
@@ -654,31 +734,95 @@ def create_app() -> Flask:
     @app.route("/admin")
     @admin_required
     def admin():
-        rows = _fetch_all_logs(app.config["DATABASE_PATH"]) or []
-        # Prepare aggregates
-        df = pd.DataFrame(rows, columns=["id", "email", "uploaded_at", "malicious_ratio", "total_rows", "malicious_rows"]) if rows else pd.DataFrame(columns=["id","email","uploaded_at","malicious_ratio","total_rows","malicious_rows"])
+        # ---------- [PAGE] 페이지 파라미터 ----------
+        page = request.args.get("page", 1, type=int)
+        if page < 1:
+            page = 1
+        start = (page - 1) * PER_PAGE
+        end   = start + PER_PAGE - 1
+
+        # rows = _fetch_all_logs(app.config["DATABASE_PATH"]) or []
+        # [FIX] 원래는 sqlite에서 _fetch_all_logs(...) 했음 → 이제 Supabase에서 전체 조회
+        resp = (
+            supabase.table("uploads")
+            .select("id, email, uploaded_at, malicious_ratio, total_rows, malicious_rows",
+                    count="exact")
+            .order("uploaded_at", desc=False)
+            .range(start, end)  # [PAGE]
+            .execute()
+        )
+
+        # 원시 rows (tuple 비슷한 형태로 정리하고 싶다면 그대로 쓰세요. 여기선 view용 dict로 가공)
+        raw = resp.data or []
+
+        # ---------- [PAGE] No + 업로드시간 포맷 ----------
+        rows_view = []
+        for idx, r in enumerate(raw, start=start + 1):   # 글로벌 순번 (페이지 넘어가면 이어짐)
+            rows_view.append({
+                "no": idx,
+                "email": r.get("email"),
+                "uploaded_at": r.get("uploaded_at"),
+                "uploaded_at_fmt": fmt_kst(r.get("uploaded_at")),  # KST 문자열
+                "malicious_ratio": r.get("malicious_ratio") or 0.0,
+                "total_rows": r.get("total_rows") or 0,
+                "malicious_rows": r.get("malicious_rows") or 0,
+            })
+        
+        cols = ["id", "email", "uploaded_at", "malicious_ratio", "total_rows", "malicious_rows"]
+        df = pd.DataFrame(raw, columns=cols) if raw else pd.DataFrame(columns=cols)
+        
         user_counts = (
             df.groupby("email")["id"].count().sort_values(ascending=False).to_dict()
             if not df.empty else {}
         )
-        time_series = (
-            df.assign(ts=pd.to_datetime(df["uploaded_at"]))
-              .sort_values("ts")
-              .assign(malicent=(df["malicious_ratio"] * 100.0))
-              [["ts", "malicent"]]
-              .to_dict(orient="records") if not df.empty else []
-        )
+
+        if not df.empty:
+            # ---------- [FIX] uploaded_at 안전 파싱 ----------
+            # 1) 문자열 정리: 'Z' → '+00:00', 최초 타임존오프셋(±HH:MM)까지만 남김
+            s = (
+                df["uploaded_at"].astype("string").str.strip()
+                .str.replace("Z", "+00:00", regex=False)
+                .str.replace(r"([+-]\d{2}:\d{2}).*$", r"\1", regex=True)
+            )
+            # 2) ISO 파서 + UTC 고정 + 오류시 NaT
+            ts_utc = pd.to_datetime(s, format="ISO8601", utc=True, errors="coerce")
+            df["ts"] = ts_utc
+            df["ts_kst"] = ts_utc.dt.tz_convert("Asia/Seoul")
+
+            # 시간 순 정렬 + (필요 시) KST로 보기 좋은 문자열로 출력
+            df_sorted = df.sort_values("ts")
+            # 기존 구조 유지: key 이름은 "ts"와 "malicent"를 그대로 사용
+            time_series = (
+                df_sorted
+                .assign(malicent=(df_sorted["malicious_ratio"].fillna(0) * 100.0))
+                .assign(ts=df_sorted["ts_kst"].dt.strftime("%Y-%m-%d %H:%M"))  # 문자열로 안전 변환
+                [["ts", "malicent"]]
+                .to_dict(orient="records")
+            )
+        else:
+            time_series = []
+    
         totals = {
             "malicious": int(df["malicious_rows"].sum()) if not df.empty else 0,
             "normal": int((df["total_rows"].sum() - df["malicious_rows"].sum())) if not df.empty else 0,
         }
+
+        # ---------- [PAGE] 페이지네이션 메타 ----------
+        total = int(resp.count or 0)
+        page_count = max(1, math.ceil(total / PER_PAGE))
+        if page > page_count:
+            page = page_count
+
         return render_template(
             "admin.html",
-            rows=rows,
+            rows=rows_view,              # [FIX] rows_view 전달
+            # rows=rows,
             user_counts=user_counts,
             time_series=time_series,
             totals=totals,
             csrf_token=session.get("csrf_token"),
+            # [PAGE] 템플릿용
+            page=page, page_count=page_count, total=total, per_page=PER_PAGE
         )
 
     @app.route("/admin/send_report", methods=["POST"])
