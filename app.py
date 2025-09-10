@@ -317,7 +317,16 @@ def create_app() -> Flask:
         total_rows = sum(r["total_rows"] for r in logs) if logs else 0
         total_mal = sum(r["malicious_rows"] for r in logs) if logs else 0
         avg_ratio = (sum(r["malicious_ratio"] for r in logs) / total_uploads) if total_uploads else 0.0
-        last_time = logs[0]["uploaded_at"] if logs else None
+        
+        latest = (
+            supabase.table("uploads")
+            .select("uploaded_at")
+            .eq("email", email)
+            .order("uploaded_at", desc=True)
+            .range(0, 0)                  # 1건만
+            .execute()
+        )
+        last_time = fmt_kst(latest.data[0]["uploaded_at"]) if latest.data else None
 
         # for r in logs:
         #     r["uploaded_at_fmt"] = _fmt_kst_str(r.get("uploaded_at"))

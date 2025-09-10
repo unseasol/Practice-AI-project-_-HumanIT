@@ -65,7 +65,7 @@
   </tbody>
 </table>
 <!-- [PAGE] 페이지네이션 네비게이션 -->
-{% if page_count > 1 %}
+{% if total > 0 %}
   <nav aria-label="pagination" class="pagination-wrap">
     <ul class="pagination">
       <!-- 이전 -->
@@ -171,7 +171,8 @@ document.addEventListener('DOMContentLoaded', function () {
         datasets: [{
           label: 'count',
           data: entries.map(e => e[1]),
-          backgroundColor: '#ff1744'
+          backgroundColor: ['#ff1744', '#0dcaf0', '#6f42c1', '#d63384'
+          , '#dc3545', '#fd7e14', '#ffc107', '#20c997']
         }]
       },
       options: {
